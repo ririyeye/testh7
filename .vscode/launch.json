@@ -1,0 +1,38 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (PyOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "pyocd",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/target/thumbv7em-none-eabihf/debug/stm32h743-led-blink",
+            "targetId": "stm32h743xx",
+            "runToEntryPoint": "main",
+            "svdFile": "${workspaceFolder}/STM32H743.svd",
+            "showDevDebugOutput": "parsed",
+            "preLaunchTask": "Build Debug",
+            "searchDir": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/target/thumbv7em-none-eabihf/debug",
+                "${env:USERPROFILE}/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/src/rust/library"
+            ]
+        },
+        {
+            "name": "Debug Debuggable (PyOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "pyocd",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/target/thumbv7em-none-eabihf/release-debuggable/stm32h743-led-blink",
+            "gdbPath": "gdb-multiarch",
+            "gdbTarget": "127.0.0.1:3333",
+            "device": "STM32H743xx",
+            "runToEntryPoint": "main",
+            "svdFile": "${workspaceFolder}/STM32H743.svd",
+            "showDevDebugOutput": "parsed",
+            "preLaunchTask": "Build Debuggable"
+        }
+    ]
+}

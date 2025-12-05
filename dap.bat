@@ -1,0 +1,1 @@
+pyocd gdbserver -t stm32h743xx --allow-remote --persist
