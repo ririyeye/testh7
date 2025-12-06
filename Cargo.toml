@@ -7,18 +7,27 @@ edition = "2021"
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 panic-halt = "1.0"
-embassy-executor = { version = "0.9", features = [
+
+# 所有 Embassy 相关依赖使用 git 主分支以确保版本一致
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
     "arch-cortex-m",
     "executor-thread",
 ] }
-embassy-time = { version = "0.5", features = ["tick-hz-1_000_000"] }
-embassy-stm32 = { version = "0.4", features = [
+embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
+    "tick-hz-1_000_000",
+] }
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
     "stm32h743ii",
     "time-driver-tim2",
 ] }
-embassy-sync = "0.7"
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+
 embedded-io-async = "0.6"
 heapless = "0.8"
+static_cell = "2.1"
+usbd-hid = "0.8"
 
 # RTT 日志 (不依赖 defmt)
 rtt-target = "0.6"
