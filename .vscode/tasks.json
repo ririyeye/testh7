@@ -2,11 +2,15 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build Debuggable",
+            "label": "Firmware: Build Debuggable",
             "type": "shell",
             "command": "cargo",
             "args": [
                 "build",
+                "-p",
+                "stm32h743-firmware",
+                "--target",
+                "thumbv7em-none-eabihf",
                 "--profile",
                 "release-debuggable"
             ],
@@ -19,11 +23,15 @@
             ]
         },
         {
-            "label": "Build Release",
+            "label": "Firmware: Build Release",
             "type": "shell",
             "command": "cargo",
             "args": [
                 "build",
+                "-p",
+                "stm32h743-firmware",
+                "--target",
+                "thumbv7em-none-eabihf",
                 "--release"
             ],
             "group": "build",
@@ -32,16 +40,79 @@
             ]
         },
         {
-            "label": "Build Debug",
+            "label": "Firmware: Build Debug",
             "type": "shell",
             "command": "cargo",
             "args": [
-                "build"
+                "build",
+                "-p",
+                "stm32h743-firmware",
+                "--target",
+                "thumbv7em-none-eabihf"
             ],
             "group": "build",
             "problemMatcher": [
                 "$rustc"
             ]
+        },
+        {
+            "label": "Host: Build",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "-p",
+                "host"
+            ],
+            "group": "build",
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "Host: Build Release",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "-p",
+                "host",
+                "--release"
+            ],
+            "group": "build",
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "Host: Run",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "run",
+                "-p",
+                "host",
+                "--"
+            ],
+            "group": "test",
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "Firmware: Embed (Flash + RTT)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "embed",
+                "--manifest-path",
+                "firmware/Cargo.toml"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware"
+            },
+            "group": "test",
+            "problemMatcher": []
         }
     ]
 }

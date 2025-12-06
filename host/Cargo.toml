@@ -1,0 +1,20 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 共享协议库
+protocol = { path = "../protocol", features = ["std"] }
+
+# USB HID 库
+hidapi = "2.6"
+
+# 命令行参数解析
+clap = { version = "4", features = ["derive"] }
+
+# 错误处理
+anyhow = "1.0"
+
+# 异步运行时 (可选，未来扩展)
+# tokio = { version = "1", features = ["full"] }

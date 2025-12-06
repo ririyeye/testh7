@@ -1,3 +1,4 @@
+# ==================== ARM 目标配置 (固件) ====================
 [target.thumbv7em-none-eabihf]
 # 使用 probe-rs 下载并运行（推荐）
 runner = "probe-rs run --chip STM32H743IITx"
@@ -5,9 +6,27 @@ runner = "probe-rs run --chip STM32H743IITx"
 # 或使用 pyocd
 # runner = ["cmd", "/c", "flash.bat"]
 
-rustflags = [
-  "-C", "link-arg=-Tlink.x",
-]
+rustflags = ["-C", "link-arg=-Tlink.x"]
 
-[build]
-target = "thumbv7em-none-eabihf"
+# ==================== 命令别名 ====================
+[alias]
+# 编译固件
+fw = "build -p stm32h743-firmware --target thumbv7em-none-eabihf"
+# 编译固件 (release)
+fwr = "build -p stm32h743-firmware --target thumbv7em-none-eabihf --release"
+# 编译固件 (debuggable release)
+fwd = "build -p stm32h743-firmware --target thumbv7em-none-eabihf --profile release-debuggable"
+# 编译上位机
+host = "build -p host"
+# 编译上位机 (release)
+hostr = "build -p host --release"
+# 运行上位机
+hostrun = "run -p host --"
+# 检查固件
+fwcheck = "check -p stm32h743-firmware --target thumbv7em-none-eabihf"
+# 检查上位机
+hostcheck = "check -p host"
+
+# 注意: 不设置默认 target，这样 host 可以用默认 target 编译
+# [build]
+# target = "thumbv7em-none-eabihf"

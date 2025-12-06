@@ -1,0 +1,11 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2021"
+
+# 默认 no_std，可选 std feature
+[features]
+default = []
+std = []
+
+[dependencies]

@@ -1,36 +1,20 @@
-[package]
-name = "stm32h743-led-blink"
-version = "0.1.0"
-edition = "2021"
+# STM32H743 项目 Workspace
+#
+# 包含:
+#   - firmware: 单片机固件 (no_std, thumbv7em-none-eabihf)
+#   - protocol: 共享协议库 (no_std + 可选 std)
+#   - host: Windows 上位机 (std)
+#
+# 构建命令:
+#   cargo fw      # 编译固件
+#   cargo host    # 编译上位机
+#   cargo embed   # 烧录固件
 
-[dependencies]
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
-cortex-m-rt = "0.7"
-panic-halt = "1.0"
+[workspace]
+members = ["firmware", "protocol", "host"]
+resolver = "2"
 
-# 所有 Embassy 相关依赖使用 git 主分支以确保版本一致
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
-    "arch-cortex-m",
-    "executor-thread",
-] }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
-    "tick-hz-1_000_000",
-] }
-embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", branch = "main", features = [
-    "stm32h743ii",
-    "time-driver-tim2",
-] }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
-embassy-usb = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
-
-embedded-io-async = "0.6"
-heapless = "0.8"
-static_cell = "2.1"
-usbd-hid = "0.8"
-
-# RTT 日志 (不依赖 defmt)
-rtt-target = "0.6"
+# ==================== 编译配置 ====================
 
 # Debug 模式 - 完全可调试，但体积大
 [profile.dev]

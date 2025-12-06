@@ -1,0 +1,15 @@
+# firmware 专用配置
+# 默认编译 ARM Cortex-M7 目标
+
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32H743IITx"
+# 注意: rustflags 在根目录的 .cargo/config.toml 中定义，不要重复
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[alias]
+# 编译并烧录
+flash = "run --release"
+# 只编译
+fw = "build --release"
