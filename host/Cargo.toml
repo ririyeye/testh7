@@ -9,6 +9,7 @@ protocol = { path = "../protocol", features = ["std"] }
 
 # USB HID 库
 hidapi = "2.6"
+rusb = "0.9"
 
 # 命令行参数解析
 clap = { version = "4", features = ["derive"] }
