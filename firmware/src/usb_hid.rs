@@ -114,6 +114,13 @@ impl Handler for MyDeviceHandler {
 
 // ==================== USB 任务 ====================
 
+/// Echo数据通道 - 用于读写任务之间传递数据
+static ECHO_CHANNEL: embassy_sync::channel::Channel<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    [u8; 64],
+    4, // 4个槽位的缓冲，实现流水线
+> = embassy_sync::channel::Channel::new();
+
 /// USB HID 主任务 - 同时运行 USB 设备和 HID 读写
 #[embassy_executor::task]
 pub async fn task(mut device: embassy_usb::UsbDevice<'static, UsbDriver>, hid: HidRW) {
@@ -122,64 +129,51 @@ pub async fn task(mut device: embassy_usb::UsbDevice<'static, UsbDriver>, hid: H
     let hid_fut = async {
         let (mut reader, mut writer) = hid.split();
 
-        // 发送任务
-        let write_fut = async {
-            let mut counter: u32 = 0;
-            loop {
-                // 等待端点准备好
-                writer.ready().await;
-
-                let mut report = [0u8; 64];
-                // 填充测试数据
-                report[0] = 0xAA; // 标识头
-                report[1] = 0x55;
-                report[2..6].copy_from_slice(&counter.to_le_bytes());
-                report[6] = b'H';
-                report[7] = b'7';
-                report[8] = b'4';
-                report[9] = b'3';
-
-                match writer.write(&report).await {
-                    Ok(_) => {
-                        rprintln!("USB HID sent: counter={}", counter);
-                        counter = counter.wrapping_add(1);
-                    }
-                    Err(e) => {
-                        rprintln!("USB HID write error: {:?}", e);
-                    }
-                }
-                Timer::after_millis(1000).await;
-            }
-        };
-
-        // 接收任务
+        // 读取任务：尽快读取数据并放入channel
         let read_fut = async {
             let mut buf = [0u8; 64];
             loop {
-                // 等待端点准备好
                 reader.ready().await;
 
                 match reader.read(&mut buf).await {
-                    Ok(n) => {
+                    Ok(n) if n > 0 => {
+                        // Echo测试模式：收到CMD_ECHO_PERF时放入channel
+                        if buf[0] == CMD_ECHO_PERF {
+                            // 尝试放入channel，如果满了就丢弃（保证读取不阻塞）
+                            let mut data = [0u8; 64];
+                            data[..n].copy_from_slice(&buf[..n]);
+                            let _ = ECHO_CHANNEL.try_send(data);
+                            continue;
+                        }
+
+                        // 其他命令正常处理并打印日志
                         rprintln!("USB HID received {} bytes: {:02X?}", n, &buf[..n.min(16)]);
-                        // 处理收到的命令
                         if buf[0] == CMD_PING {
                             rprintln!("  -> Command: PING");
                         } else if buf[0] == CMD_GET_STATUS {
                             rprintln!("  -> Command: GET_STATUS");
                         }
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         rprintln!("USB HID read error: {:?}", e);
-                        // 出错时等待一下再重试
                         Timer::after_millis(100).await;
                     }
                 }
             }
         };
 
-        // 同时运行读写
-        embassy_futures::join::join(write_fut, read_fut).await
+        // 写入任务：从channel取数据并发送
+        let write_fut = async {
+            loop {
+                let data = ECHO_CHANNEL.receive().await;
+                writer.ready().await;
+                let _ = writer.write(&data).await;
+            }
+        };
+
+        // 同时运行读写任务
+        embassy_futures::join::join(read_fut, write_fut).await
     };
 
     // 同时运行 USB 设备和 HID 任务

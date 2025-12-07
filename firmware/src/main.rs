@@ -2,7 +2,7 @@
 #![no_main]
 
 mod shell;
-mod usb_hid;
+mod usb_bulk;
 
 use panic_halt as _;
 use rtt_target::{rprintln, rtt_init_print};
@@ -130,14 +130,14 @@ async fn main(spawner: Spawner) {
     spawner.spawn(shell_task(tx, rx).unwrap());
     rprintln!("Serial shell started on USART1 (PA9/PA10) @ 115200");
 
-    // ========== USB HID 初始化 ==========
-    let usb_periph = usb_hid::UsbPeripherals {
+    // ========== USB Bulk 初始化 ==========
+    let usb_periph = usb_bulk::UsbPeripherals {
         usb_otg_fs: p.USB_OTG_FS,
         dp: p.PA12,
         dm: p.PA11,
     };
-    spawner.spawn(usb_hid::start(usb_periph, Irqs).unwrap());
-    rprintln!("USB HID started on PA11(D-)/PA12(D+)");
+    spawner.spawn(usb_bulk::start(usb_periph, Irqs).unwrap());
+    rprintln!("USB Bulk started on PA11(D-)/PA12(D+)");
 
     // 主循环：LED0 一直闪烁
     loop {
