@@ -90,6 +90,7 @@ static ECHO_CHANNEL: embassy_sync::channel::Channel<
 > = embassy_sync::channel::Channel::new();
 
 /// Bulk 端点类型
+#[allow(dead_code)]
 pub struct BulkEndpoints<'d, D: embassy_usb::driver::Driver<'d>> {
     pub read_ep: D::EndpointOut,
     pub write_ep: D::EndpointIn,

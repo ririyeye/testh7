@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod fusion;
 mod mpu9250;
 mod shell;
 mod usb_bulk;
@@ -19,6 +20,7 @@ use embassy_stm32::{bind_interrupts, peripherals, usart, Config, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
+use fusion::{AhrsState, CalState, Calibration, Vec3};
 use mpu9250::{ImuData, Mpu9250};
 use static_cell::StaticCell;
 
@@ -39,10 +41,31 @@ static IMU_DATA: StaticCell<Mutex<CriticalSectionRawMutex, Option<ImuData>>> = S
 /// IMU 数据的全局引用 (在 main 中初始化后设置)
 static mut IMU_DATA_REF: Option<&'static Mutex<CriticalSectionRawMutex, Option<ImuData>>> = None;
 
+static CALIB: StaticCell<Mutex<CriticalSectionRawMutex, Calibration>> = StaticCell::new();
+static mut CALIB_REF: Option<&'static Mutex<CriticalSectionRawMutex, Calibration>> = None;
+
+static CAL_STATE: StaticCell<Mutex<CriticalSectionRawMutex, CalState>> = StaticCell::new();
+static mut CAL_STATE_REF: Option<&'static Mutex<CriticalSectionRawMutex, CalState>> = None;
+
+static AHRS_STATE: StaticCell<Mutex<CriticalSectionRawMutex, AhrsState>> = StaticCell::new();
+static mut AHRS_STATE_REF: Option<&'static Mutex<CriticalSectionRawMutex, AhrsState>> = None;
+
 /// 获取 IMU 数据的引用
 pub fn imu_data() -> &'static Mutex<CriticalSectionRawMutex, Option<ImuData>> {
     // 安全: 在 main 中初始化后才会被调用
     unsafe { IMU_DATA_REF.unwrap_unchecked() }
+}
+
+pub fn calib() -> &'static Mutex<CriticalSectionRawMutex, Calibration> {
+    unsafe { CALIB_REF.unwrap_unchecked() }
+}
+
+pub fn cal_state() -> &'static Mutex<CriticalSectionRawMutex, CalState> {
+    unsafe { CAL_STATE_REF.unwrap_unchecked() }
+}
+
+pub fn ahrs_state() -> &'static Mutex<CriticalSectionRawMutex, AhrsState> {
+    unsafe { AHRS_STATE_REF.unwrap_unchecked() }
 }
 
 /// LED1 + KEY1 异步任务：按下 KEY1 时 LED1 闪烁
@@ -183,6 +206,16 @@ async fn main(spawner: Spawner) {
         IMU_DATA_REF = Some(imu_mutex);
     }
 
+    // 初始化融合/校准状态
+    let calib_mutex = CALIB.init(Mutex::new(Calibration::default()));
+    let cal_state_mutex = CAL_STATE.init(Mutex::new(CalState::default()));
+    let ahrs_mutex = AHRS_STATE.init(Mutex::new(AhrsState::default()));
+    unsafe {
+        CALIB_REF = Some(calib_mutex);
+        CAL_STATE_REF = Some(cal_state_mutex);
+        AHRS_STATE_REF = Some(ahrs_mutex);
+    }
+
     // 启动 MPU-9250 任务
     spawner.spawn(mpu9250_task(i2c2).unwrap());
 
@@ -228,9 +261,15 @@ async fn mpu9250_task(i2c: I2c<'static, embassy_stm32::mode::Async, embassy_stm3
 
     // 持续读取数据
     let mut print_counter = 0u32;
+    let mut last_t = embassy_time::Instant::now();
+
     loop {
         match imu.read_raw().await {
             Ok(data) => {
+                let now = embassy_time::Instant::now();
+                let dt_s = (now - last_t).as_micros() as f32 / 1_000_000.0;
+                last_t = now;
+
                 // 每秒打印一次 (100次 * 10ms = 1秒)
                 if print_counter % 100 == 0 {
                     let acc_s = mpu9250::AccRange::G8.sensitivity();
@@ -247,6 +286,138 @@ async fn mpu9250_task(i2c: I2c<'static, embassy_stm32::mode::Async, embassy_stm3
                     );
                 }
                 print_counter = print_counter.wrapping_add(1);
+
+                // 计算物理量
+                let acc_s = mpu9250::AccRange::G8.sensitivity();
+                let gyro_s = mpu9250::GyroRange::Dps2000.sensitivity();
+
+                let acc_g = Vec3::new(
+                    data.acc.x as f32 * acc_s,
+                    data.acc.y as f32 * acc_s,
+                    data.acc.z as f32 * acc_s,
+                );
+
+                let gyro_dps = Vec3::new(
+                    data.gyro.x as f32 * gyro_s,
+                    data.gyro.y as f32 * gyro_s,
+                    data.gyro.z as f32 * gyro_s,
+                );
+
+                let mag_u_t = data
+                    .mag
+                    .and_then(|m| imu.mag_raw_to_u_t(m))
+                    .map(|(x, y, z)| Vec3::new(x, y, z));
+
+                // 校准 + 融合更新
+                let calib_now = { *calib().lock().await };
+                let gyro_cal = calib_now.apply_gyro_dps(gyro_dps);
+                let acc_cal = calib_now.apply_acc_g(acc_g);
+                let mag_cal = mag_u_t.map(|m| calib_now.apply_mag_u_t(m));
+
+                // 校准采集
+                {
+                    let mut cal_state_guard = cal_state().lock().await;
+                    match cal_state_guard.mode {
+                        fusion::CalMode::None => {}
+                        fusion::CalMode::GyroBias {
+                            remaining,
+                            mut sum,
+                            mut count,
+                        } => {
+                            sum = sum.add(gyro_dps);
+                            count = count.wrapping_add(1);
+                            let remaining = remaining.saturating_sub(1);
+                            if remaining == 0 {
+                                let inv = if count > 0 { 1.0 / count as f32 } else { 0.0 };
+                                let bias = sum.scale(inv);
+                                let mut cg = calib().lock().await;
+                                cg.gyro_bias_dps = bias;
+                                cal_state_guard.mode = fusion::CalMode::None;
+                            } else {
+                                cal_state_guard.mode = fusion::CalMode::GyroBias {
+                                    remaining,
+                                    sum,
+                                    count,
+                                };
+                            }
+                        }
+                        fusion::CalMode::AccMinMax {
+                            remaining,
+                            mut min,
+                            mut max,
+                            mut init,
+                        } => {
+                            fusion::update_minmax(&mut min, &mut max, acc_g, &mut init);
+                            let remaining = remaining.saturating_sub(1);
+                            if remaining == 0 {
+                                let (bias, scale) = fusion::solve_minmax_bias_scale(min, max);
+                                let mut cg = calib().lock().await;
+                                cg.acc_bias_g = bias;
+                                cg.acc_scale = scale;
+                                cal_state_guard.mode = fusion::CalMode::None;
+                            } else {
+                                cal_state_guard.mode = fusion::CalMode::AccMinMax {
+                                    remaining,
+                                    min,
+                                    max,
+                                    init,
+                                };
+                            }
+                        }
+                        fusion::CalMode::MagMinMax {
+                            remaining,
+                            mut min,
+                            mut max,
+                            mut init,
+                        } => {
+                            if let Some(m) = mag_u_t {
+                                fusion::update_minmax(&mut min, &mut max, m, &mut init);
+                            }
+                            let remaining = remaining.saturating_sub(1);
+                            if remaining == 0 {
+                                let (bias, scale) = fusion::solve_minmax_bias_scale(min, max);
+                                let mut cg = calib().lock().await;
+                                cg.mag_bias_u_t = bias;
+                                cg.mag_scale = scale;
+                                cal_state_guard.mode = fusion::CalMode::None;
+                            } else {
+                                cal_state_guard.mode = fusion::CalMode::MagMinMax {
+                                    remaining,
+                                    min,
+                                    max,
+                                    init,
+                                };
+                            }
+                        }
+                    }
+                }
+
+                {
+                    let mut ahrs = ahrs_state().lock().await;
+                    let dt = if dt_s.is_finite() && dt_s > 0.0005 && dt_s < 0.1 {
+                        dt_s
+                    } else {
+                        0.01
+                    };
+                    ahrs.update(gyro_cal, acc_cal, mag_cal, dt);
+                }
+
+                // 每秒打印一次融合姿态
+                if print_counter % 100 == 0 {
+                    let ahrs = { *ahrs_state().lock().await };
+                    let q = ahrs.quaternion();
+                    let (roll, pitch, yaw) = q.to_euler_deg();
+                    rprintln!(
+                        "AHRS: q[{:.4},{:.4},{:.4},{:.4}] rpy[{:.1},{:.1},{:.1}]deg",
+                        q.w,
+                        q.x,
+                        q.y,
+                        q.z,
+                        roll,
+                        pitch,
+                        yaw
+                    );
+                }
 
                 // 更新全局共享数据
                 let mut guard = imu_data().lock().await;

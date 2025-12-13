@@ -8,6 +8,9 @@ use embassy_time::Timer;
 use embedded_hal_async::i2c::I2c;
 use rtt_target::rprintln;
 
+/// AK8963 (MPU-9250 内置磁力计) I2C 地址
+pub const AK8963_ADDR: u8 = 0x0C;
+
 /// MPU-9250 I2C 地址 (AD0 接地)
 pub const MPU9250_ADDR: u8 = 0x68;
 /// MPU-9250 I2C 备用地址 (AD0 接 VDD)
@@ -28,6 +31,9 @@ mod reg {
     pub const INT_PIN_CFG: u8 = 0x37;
     pub const INT_ENABLE: u8 = 0x38;
     pub const INT_STATUS: u8 = 0x3A;
+
+    // 用户控制
+    pub const USER_CTRL: u8 = 0x6A;
 
     // 加速度计数据 (高字节在前)
     pub const ACCEL_XOUT_H: u8 = 0x3B;
@@ -55,6 +61,19 @@ mod reg {
 
     // 芯片 ID
     pub const WHO_AM_I: u8 = 0x75;
+}
+
+// ========== AK8963 寄存器地址 ==========
+mod ak {
+    pub const WHO_AM_I: u8 = 0x00;
+    pub const ST1: u8 = 0x02;
+    pub const HXL: u8 = 0x03;
+    pub const ST2: u8 = 0x09;
+    pub const CNTL1: u8 = 0x0A;
+    pub const CNTL2: u8 = 0x0B;
+    pub const ASAX: u8 = 0x10;
+
+    pub const WHO_AM_I_VAL: u8 = 0x48;
 }
 
 /// 加速度计量程
@@ -125,6 +144,7 @@ pub struct ImuData {
     pub acc: AxisData,
     pub gyro: AxisData,
     pub temp_raw: i16,
+    pub mag: Option<AxisData>,
 }
 
 impl ImuData {
@@ -141,6 +161,20 @@ pub struct Mpu9250<I2C> {
     addr: u8,
     acc_range: AccRange,
     gyro_range: GyroRange,
+    mag: Option<MagState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MagState {
+    // 工厂灵敏度调整 (ASA)
+    asa: Vec3f,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Vec3f {
+    x: f32,
+    y: f32,
+    z: f32,
 }
 
 #[derive(Debug)]
@@ -166,6 +200,7 @@ where
             addr: MPU9250_ADDR,
             acc_range: AccRange::G8,
             gyro_range: GyroRange::Dps2000,
+            mag: None,
         }
     }
 
@@ -176,13 +211,18 @@ where
             addr,
             acc_range: AccRange::G8,
             gyro_range: GyroRange::Dps2000,
+            mag: None,
         }
     }
 
     /// 读取单个寄存器
     async fn read_reg(&mut self, reg: u8) -> Result<u8, Error<E>> {
+        self.read_reg_at(self.addr, reg).await
+    }
+
+    async fn read_reg_at(&mut self, addr: u8, reg: u8) -> Result<u8, Error<E>> {
         let mut buf = [0u8];
-        self.i2c.write_read(self.addr, &[reg], &mut buf).await?;
+        self.i2c.write_read(addr, &[reg], &mut buf).await?;
         Ok(buf[0])
     }
 
@@ -192,9 +232,78 @@ where
         Ok(())
     }
 
+    async fn read_regs_at(&mut self, addr: u8, reg: u8, buf: &mut [u8]) -> Result<(), Error<E>> {
+        self.i2c.write_read(addr, &[reg], buf).await?;
+        Ok(())
+    }
+
     /// 写单个寄存器
     async fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), Error<E>> {
-        self.i2c.write(self.addr, &[reg, val]).await?;
+        self.write_reg_at(self.addr, reg, val).await
+    }
+
+    async fn write_reg_at(&mut self, addr: u8, reg: u8, val: u8) -> Result<(), Error<E>> {
+        self.i2c.write(addr, &[reg, val]).await?;
+        Ok(())
+    }
+
+    async fn enable_i2c_bypass(&mut self) -> Result<(), Error<E>> {
+        let cfg = self.read_reg(reg::INT_PIN_CFG).await?;
+        // BYPASS_EN = bit1
+        self.write_reg(reg::INT_PIN_CFG, cfg | 0x02).await?;
+        Ok(())
+    }
+
+    async fn init_mag(&mut self) -> Result<(), Error<E>> {
+        self.enable_i2c_bypass().await?;
+
+        let who = self.read_reg_at(AK8963_ADDR, ak::WHO_AM_I).await?;
+        if who != ak::WHO_AM_I_VAL {
+            rprintln!("AK8963: unexpected WHO_AM_I: 0x{:02X}", who);
+            return Ok(());
+        }
+
+        // Reset
+        let _ = self.write_reg_at(AK8963_ADDR, ak::CNTL2, 0x01).await;
+        Timer::after_millis(50).await;
+
+        // Power down
+        self.write_reg_at(AK8963_ADDR, ak::CNTL1, 0x00).await?;
+        Timer::after_millis(10).await;
+
+        // Enter fuse ROM access mode
+        self.write_reg_at(AK8963_ADDR, ak::CNTL1, 0x0F).await?;
+        Timer::after_millis(10).await;
+
+        let mut asa = [0u8; 3];
+        self.read_regs_at(AK8963_ADDR, ak::ASAX, &mut asa).await?;
+
+        // Convert ASA to scale factor: (ASA - 128)/256 + 1
+        let asa_x = (asa[0] as f32 - 128.0) / 256.0 + 1.0;
+        let asa_y = (asa[1] as f32 - 128.0) / 256.0 + 1.0;
+        let asa_z = (asa[2] as f32 - 128.0) / 256.0 + 1.0;
+
+        // Power down
+        self.write_reg_at(AK8963_ADDR, ak::CNTL1, 0x00).await?;
+        Timer::after_millis(10).await;
+
+        // Continuous measurement 2 (100Hz), 16-bit output: 0x16
+        self.write_reg_at(AK8963_ADDR, ak::CNTL1, 0x16).await?;
+        Timer::after_millis(10).await;
+
+        self.mag = Some(MagState {
+            asa: Vec3f {
+                x: asa_x,
+                y: asa_y,
+                z: asa_z,
+            },
+        });
+        rprintln!(
+            "AK8963: enabled (ASA {:.3},{:.3},{:.3})",
+            asa_x,
+            asa_y,
+            asa_z
+        );
         Ok(())
     }
 
@@ -245,6 +354,11 @@ where
 
         Timer::after_millis(10).await;
         rprintln!("MPU9250: initialized (Acc=±8g, Gyro=±2000°/s, ODR=200Hz)");
+
+        // 尝试初始化磁力计 (AK8963)，失败不致命
+        if self.init_mag().await.is_err() {
+            rprintln!("AK8963 init failed");
+        }
         Ok(())
     }
 
@@ -278,6 +392,8 @@ where
         self.read_regs(reg::ACCEL_XOUT_H, &mut buf).await?;
 
         // MPU-9250 是大端序 (高字节在前)
+        let mag = self.read_mag_raw().await.ok().flatten();
+
         Ok(ImuData {
             acc: AxisData {
                 x: i16::from_be_bytes([buf[0], buf[1]]),
@@ -290,7 +406,69 @@ where
                 y: i16::from_be_bytes([buf[10], buf[11]]),
                 z: i16::from_be_bytes([buf[12], buf[13]]),
             },
+            mag,
         })
+    }
+
+    /// 读取磁力计原始数据（AK8963，单位: LSB）
+    pub async fn read_mag_raw(&mut self) -> Result<Option<AxisData>, Error<E>> {
+        if self.mag.is_none() {
+            return Ok(None);
+        }
+
+        let st1 = self.read_reg_at(AK8963_ADDR, ak::ST1).await?;
+        if (st1 & 0x01) == 0 {
+            return Ok(None);
+        }
+
+        let mut buf = [0u8; 7];
+        self.read_regs_at(AK8963_ADDR, ak::HXL, &mut buf).await?;
+
+        // Data is little-endian: HXL, HXH, HYL, HYH, HZL, HZH, ST2
+        let x = i16::from_le_bytes([buf[0], buf[1]]);
+        let y = i16::from_le_bytes([buf[2], buf[3]]);
+        let z = i16::from_le_bytes([buf[4], buf[5]]);
+        let st2 = buf[6];
+
+        // Overflow bit
+        if (st2 & 0x08) != 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(AxisData { x, y, z }))
+    }
+
+    /// 读取磁力计（单位: uT），自动应用工厂 ASA 调整
+    pub async fn read_mag_u_t(&mut self) -> Result<Option<(f32, f32, f32)>, Error<E>> {
+        let raw = match self.read_mag_raw().await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let Some(state) = self.mag else {
+            return Ok(None);
+        };
+
+        // 16-bit mode sensitivity: 4912 uT full scale
+        const UT_PER_LSB: f32 = 4912.0 / 32760.0;
+
+        let mx = raw.x as f32 * UT_PER_LSB * state.asa.x;
+        let my = raw.y as f32 * UT_PER_LSB * state.asa.y;
+        let mz = raw.z as f32 * UT_PER_LSB * state.asa.z;
+        Ok(Some((mx, my, mz)))
+    }
+
+    /// 将磁力计原始数据转换为 uT（不进行 I2C 读写）
+    pub fn mag_raw_to_u_t(&self, raw: AxisData) -> Option<(f32, f32, f32)> {
+        let Some(state) = self.mag else {
+            return None;
+        };
+
+        const UT_PER_LSB: f32 = 4912.0 / 32760.0;
+        let mx = raw.x as f32 * UT_PER_LSB * state.asa.x;
+        let my = raw.y as f32 * UT_PER_LSB * state.asa.y;
+        let mz = raw.z as f32 * UT_PER_LSB * state.asa.z;
+        Some((mx, my, mz))
     }
 
     /// 读取加速度 (单位: g)

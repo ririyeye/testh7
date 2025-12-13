@@ -30,6 +30,7 @@ embedded-hal-async = "1.0"
 heapless = "0.8"
 static_cell = "2.1"
 usbd-hid = "0.8"
+libm = "0.2"
 
 # RTT 日志 (不依赖 defmt)
 rtt-target = "0.6"
