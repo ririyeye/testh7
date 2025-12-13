@@ -26,6 +26,7 @@ embassy-usb = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 
 embedded-io-async = "0.6"
+embedded-hal-async = "1.0"
 heapless = "0.8"
 static_cell = "2.1"
 usbd-hid = "0.8"

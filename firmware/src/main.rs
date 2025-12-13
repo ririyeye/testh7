@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod mpu9250;
 mod shell;
 mod usb_bulk;
 
@@ -9,21 +10,40 @@ use rtt_target::{rprintln, rtt_init_print};
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
+use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::peripherals::{PB0, PH2};
 use embassy_stm32::rcc::*;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usart::{Config as UartConfig, RingBufferedUartRx, Uart, UartTx};
 use embassy_stm32::{bind_interrupts, peripherals, usart, Config, Peri};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
+use mpu9250::{ImuData, Mpu9250};
+use static_cell::StaticCell;
 
 /// RX DMA 环形缓冲区大小
 const RX_BUF_SIZE: usize = 256;
 
-// 绑定 USART1 中断
+// 绑定中断
 bind_interrupts!(struct Irqs {
     USART1 => usart::InterruptHandler<peripherals::USART1>;
     OTG_FS => embassy_stm32::usb::InterruptHandler<peripherals::USB_OTG_FS>;
+    I2C2_EV => i2c::EventInterruptHandler<peripherals::I2C2>;
+    I2C2_ER => i2c::ErrorInterruptHandler<peripherals::I2C2>;
 });
+
+/// 全局 IMU 数据共享
+static IMU_DATA: StaticCell<Mutex<CriticalSectionRawMutex, Option<ImuData>>> = StaticCell::new();
+
+/// IMU 数据的全局引用 (在 main 中初始化后设置)
+static mut IMU_DATA_REF: Option<&'static Mutex<CriticalSectionRawMutex, Option<ImuData>>> = None;
+
+/// 获取 IMU 数据的引用
+pub fn imu_data() -> &'static Mutex<CriticalSectionRawMutex, Option<ImuData>> {
+    // 安全: 在 main 中初始化后才会被调用
+    unsafe { IMU_DATA_REF.unwrap_unchecked() }
+}
 
 /// LED1 + KEY1 异步任务：按下 KEY1 时 LED1 闪烁
 #[embassy_executor::task]
@@ -139,6 +159,33 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_bulk::start(usb_periph, Irqs).unwrap());
     rprintln!("USB Bulk started on PA11(D-)/PA12(D+)");
 
+    // ========== I2C2 + MPU-9250 IMU 初始化 ==========
+    // MPU-9250 连接: PH4 = I2C2_SCL, PH5 = I2C2_SDA
+    let mut i2c_config = embassy_stm32::i2c::Config::default();
+    // 先用低速模式调试
+    i2c_config.frequency = Hertz::khz(100);
+
+    // 检查 I2C2 时钟
+    rprintln!("Creating I2C2 instance...");
+
+    let i2c2 = I2c::new(
+        p.I2C2, p.PH4, // SCL
+        p.PH5, // SDA
+        Irqs, p.DMA1_CH2, // TX DMA
+        p.DMA1_CH3, // RX DMA
+        i2c_config,
+    );
+    rprintln!("I2C2 initialized @ 100kHz (PH4=SCL, PH5=SDA)");
+
+    // 初始化全局 IMU 数据
+    let imu_mutex = IMU_DATA.init(Mutex::new(None));
+    unsafe {
+        IMU_DATA_REF = Some(imu_mutex);
+    }
+
+    // 启动 MPU-9250 任务
+    spawner.spawn(mpu9250_task(i2c2).unwrap());
+
     // 主循环：LED0 一直闪烁
     loop {
         led0.set_low(); // 点亮
@@ -156,4 +203,59 @@ async fn shell_task(
     rx: RingBufferedUartRx<'static>,
 ) {
     shell::run(tx, rx).await;
+}
+
+/// MPU-9250 IMU 任务：持续读取传感器数据
+#[embassy_executor::task]
+async fn mpu9250_task(i2c: I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::Master>) {
+    // 等待一下让 I2C 总线稳定
+    Timer::after_millis(100).await;
+
+    // 创建 MPU-9250 驱动 (地址 0x68)
+    let mut imu = Mpu9250::new(i2c);
+
+    // 初始化传感器
+    match imu.init().await {
+        Ok(_) => rprintln!("MPU-9250 IMU initialized successfully!"),
+        Err(e) => {
+            rprintln!("MPU-9250 init failed: {:?}", e);
+            // 进入空闲循环
+            loop {
+                Timer::after_secs(1).await;
+            }
+        }
+    }
+
+    // 持续读取数据
+    let mut print_counter = 0u32;
+    loop {
+        match imu.read_raw().await {
+            Ok(data) => {
+                // 每秒打印一次 (100次 * 10ms = 1秒)
+                if print_counter % 100 == 0 {
+                    let acc_s = mpu9250::AccRange::G8.sensitivity();
+                    let gyro_s = mpu9250::GyroRange::Dps2000.sensitivity();
+                    rprintln!(
+                        "IMU: Acc({:.2},{:.2},{:.2})g Gyro({:.1},{:.1},{:.1})dps T={:.1}C",
+                        data.acc.x as f32 * acc_s,
+                        data.acc.y as f32 * acc_s,
+                        data.acc.z as f32 * acc_s,
+                        data.gyro.x as f32 * gyro_s,
+                        data.gyro.y as f32 * gyro_s,
+                        data.gyro.z as f32 * gyro_s,
+                        data.temp_celsius()
+                    );
+                }
+                print_counter = print_counter.wrapping_add(1);
+
+                // 更新全局共享数据
+                let mut guard = imu_data().lock().await;
+                *guard = Some(data);
+            }
+            Err(e) => {
+                rprintln!("MPU-9250 read error: {:?}", e);
+            }
+        }
+        Timer::after_millis(10).await; // 100Hz 采样
+    }
 }

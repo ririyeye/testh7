@@ -3,6 +3,7 @@
 //! 提供类似 Linux 终端的交互式命令行界面
 //! 使用 USART1 (PA9/PA10) @ 115200 波特率
 
+use crate::{imu_data, mpu9250};
 use embassy_stm32::mode::Async;
 use embassy_stm32::usart::{RingBufferedUartRx, UartTx};
 use embedded_io_async::Write;
@@ -35,6 +36,7 @@ async fn process_command(tx: &mut UartTx<'_, Async>, cmd: &str) {
 Available commands:\r\n\
   help        - Show this help\r\n\
   info        - Show system info\r\n\
+  imu         - Show MPU-9250 IMU data\r\n\
   led <0|1>   - Turn LED0 on/off\r\n\
   uptime      - Show uptime\r\n\
   echo <text> - Echo text back\r\n\
@@ -66,6 +68,60 @@ UART: 115200 8N1\r\n",
                 format_args!("Uptime: {}h {}m {}s\r\n", hours, mins % 60, secs % 60),
             );
             write_str(tx, buf.as_str()).await;
+        }
+        "imu" => {
+            // 读取共享的 IMU 数据
+            let data = {
+                let guard = imu_data().lock().await;
+                *guard
+            };
+
+            match data {
+                Some(imu) => {
+                    // 转换为实际物理量 (MPU-9250: ±8g, ±2000°/s)
+                    let acc_s = mpu9250::AccRange::G8.sensitivity();
+                    let gyro_s = mpu9250::GyroRange::Dps2000.sensitivity();
+
+                    let ax = imu.acc.x as f32 * acc_s;
+                    let ay = imu.acc.y as f32 * acc_s;
+                    let az = imu.acc.z as f32 * acc_s;
+
+                    let gx = imu.gyro.x as f32 * gyro_s;
+                    let gy = imu.gyro.y as f32 * gyro_s;
+                    let gz = imu.gyro.z as f32 * gyro_s;
+
+                    let temp = imu.temp_celsius();
+
+                    let mut buf: String<256> = String::new();
+                    let _ = core::fmt::write(
+                        &mut buf,
+                        format_args!(
+                            "MPU-9250 IMU Data:\r\n\
+  Acc:  X={:7.3}g  Y={:7.3}g  Z={:7.3}g\r\n\
+  Gyro: X={:8.2}/s Y={:8.2}/s Z={:8.2}/s\r\n\
+  Temp: {:.1}C\r\n\
+  Raw:  ACC({},{},{}) GYRO({},{},{})\r\n",
+                            ax,
+                            ay,
+                            az,
+                            gx,
+                            gy,
+                            gz,
+                            temp,
+                            imu.acc.x,
+                            imu.acc.y,
+                            imu.acc.z,
+                            imu.gyro.x,
+                            imu.gyro.y,
+                            imu.gyro.z,
+                        ),
+                    );
+                    write_str(tx, buf.as_str()).await;
+                }
+                None => {
+                    write_str(tx, "IMU not initialized or no data available\r\n").await;
+                }
+            }
         }
         "echo" => {
             if parts.len() > 1 {
